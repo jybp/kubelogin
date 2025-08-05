@@ -3,6 +3,8 @@ package client
 import (
 	"context"
 	"fmt"
+	"net"
+	"strings"
 
 	gooidc "github.com/coreos/go-oidc/v3/oidc"
 	"github.com/int128/kubelogin/pkg/oidc"
@@ -40,9 +42,38 @@ func (c *client) NegotiatedPKCEMethod() pkce.Method {
 	return c.negotiatedPKCEMethod
 }
 
+// validateBindAddresses checks if any of the bind addresses are available
+func (c *client) validateBindAddresses(addresses []string) error {
+	var errors []string
+	availableCount := 0
+	
+	for _, addr := range addresses {
+		listener, err := net.Listen("tcp", addr)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("address %s: %v", addr, err))
+		} else {
+			listener.Close()
+			availableCount++
+		}
+	}
+	
+	if availableCount == 0 {
+		return fmt.Errorf("all bind addresses are unavailable: %s", strings.Join(errors, "; "))
+	}
+	
+	c.logger.V(1).Infof("found %d available bind addresses out of %d", availableCount, len(addresses))
+	return nil
+}
+
 // GetTokenByAuthCode performs the authorization code flow.
 func (c *client) GetTokenByAuthCode(ctx context.Context, in GetTokenByAuthCodeInput, localServerReadyChan chan<- string) (*oidc.TokenSet, error) {
 	ctx = c.wrapContext(ctx)
+	
+	// Pre-validate bind addresses to prevent hanging
+	if err := c.validateBindAddresses(in.BindAddress); err != nil {
+		return nil, fmt.Errorf("port binding validation failed: %w", err)
+	}
+	
 	config := oauth2cli.Config{
 		OAuth2Config:           c.oauth2Config,
 		State:                  in.State,
@@ -56,6 +87,7 @@ func (c *client) GetTokenByAuthCode(ctx context.Context, in GetTokenByAuthCodeIn
 		LocalServerKeyFile:     in.LocalServerKeyFile,
 		Logf:                   c.logger.V(1).Infof,
 	}
+	
 	token, err := oauth2cli.GetToken(ctx, config)
 	if err != nil {
 		return nil, fmt.Errorf("oauth2 error: %w", err)
